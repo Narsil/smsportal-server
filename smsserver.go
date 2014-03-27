@@ -3,13 +3,16 @@ package main
 import (
     "database/sql"
     "github.com/coopernurse/gorp"
+    "github.com/Narsil/xmpp"
     _ "github.com/mattn/go-sqlite3"
     "log"
+    "io"
     "time"
     "net/http"
     "encoding/json"
     "fmt"
     "strings"
+    "html"
     "html/template"
 )
 
@@ -23,6 +26,9 @@ type Message struct {
     Incoming bool
 }
 
+func authenticate(username, password string) bool{
+    return true
+}
 
 func main(){
     dbmap := initDb()
@@ -150,6 +156,7 @@ func main(){
         }
 
     })
+    srv := xmpp.NewServer()
     http.HandleFunc("/received/", func(w http.ResponseWriter, r *http.Request) {
         err := r.ParseForm()
         checkErr(err, "Parsing form failed")
@@ -158,7 +165,7 @@ func main(){
         message := r.Form.Get("Message")
 
         if (from != "" && message != ""){
-            m := newIncomingMessage(from, message)
+            m := newIncomingMessage(from, message, srv)
             err = dbmap.Insert(&m)
         }
         if err == nil{
@@ -168,11 +175,57 @@ func main(){
         }
 
     })
+    err := srv.SetKeyPair("private.cert", "private.key")
+    if (err != nil){
+    }
+    srv.SetAuthFunc(authenticate)
+    srv.SetHandleIncomingMessage(
+        func (msg xmpp.XmppMessage){
+            for _, body := range(msg.Bodies){
+                number := strings.Split(msg.To, "@")[0]
+                message := newMessage(number, html.UnescapeString(body.Body))
+                err := dbmap.Insert(&message)
+                checkErr(err, "Could not insert new message")
+            }
+    })
+    srv.HandleQuery("http://jabber.org/protocol/disco#info", func (w io.Writer, iq xmpp.IQ){
+            w.Write([]byte(`<iq type='result' from='sms.nicolas.kwyk.fr' to='nicolas@kwyk.fr/YY9R80gi' id='` + iq.Id + `'>
+                        <query xmlns='http://jabber.org/protocol/disco#info'>
+                            <feature var='http://jabber.org/protocol/disco#info'/>
+                            <feature var='http://jabber.org/protocol/disco#items'/>
+                        </query>
+                    </iq>
+            `))
+    })
+    srv.HandleQuery("http://jabber.org/protocol/disco#items", func (w io.Writer, iq xmpp.IQ){
+        w.Write([]byte(`<iq type='result' from='sms.nicolas.kwyk.fr' to='nicolas@kwyk.fr/YY9R80gi' id='` + iq.Id + `'>
+                <error code="501" type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error>
+                </iq>
+        `))
+    })
+    srv.HandleQuery("jabber:iq:roster", func(w io.Writer, iq xmpp.IQ){
+            w.Write([]byte(`<iq type='result' to='nicolas@kwyk.fr/YY9R80gi' id='` + iq.Id + `'>
+                    <query xmlns="jabber:iq:roster">
+                        <item jid="+33609781500@sms.nicolas.kwyk.fr" subscription="both" name="Julie Famery Phone"><group>Buddies</group></item>
+                        <item jid="+33672317534@sms.nicolas.kwyk.fr" subscription="both" name="Nicolas Patry Phone"><group>Buddies</group></item>
+                    </query>
+                </iq>
+            `))
+            w.Write([]byte(`<presence from="+33609781500@sms.nicolas.kwyk.fr" to="nicolas@kwyk.fr/YY9R80gi"><caps:c node="http://www.android.com/gtalk/client/caps" ver="1.1" xmlns:caps="http://jabber.org/protocol/caps"/></presence>`))
+            w.Write([]byte(`<presence from="+33672317534@sms.nicolas.kwyk.fr" to="nicolas@kwyk.fr/YY9R80gi"><caps:c node="http://www.android.com/gtalk/client/caps" ver="1.1" xmlns:caps="http://jabber.org/protocol/caps"/></presence>`))
+    })
+
+
+    go func(){
+        srv.ListenAndServe("tcp", ":5222")
+    }()
     log.Fatal(http.ListenAndServe(":8080", nil))
 
 }
 
+
 func newMessage(destination, message string) Message {
+    fmt.Println("Sending SMS to: ", destination)
     return Message{
         Created: time.Now().UnixNano(),
         From: "+33672317534",
@@ -182,7 +235,12 @@ func newMessage(destination, message string) Message {
         Incoming: false,
     }
 }
-func newIncomingMessage(author, message string) Message {
+func newIncomingMessage(author, message string, srv xmpp.Server) Message {
+    fmt.Println("Received SMS from: ", author)
+    go func(){
+        srv.MessageChannel<-xmpp.Message{From: author, Message:message, To: "nicolas"}
+    }()
+
     return Message{
         Created: time.Now().UnixNano(),
         From: author,
