@@ -156,7 +156,7 @@ func main(){
         }
 
     })
-    srv := xmpp.NewServer()
+    srv := xmpp.NewServer("sms.nicolas.kwyk.fr")
     http.HandleFunc("/received/", func(w http.ResponseWriter, r *http.Request) {
         err := r.ParseForm()
         checkErr(err, "Parsing form failed")
