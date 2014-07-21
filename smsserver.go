@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+    "errors"
 )
 
 type Message struct {
@@ -24,6 +25,13 @@ type Message struct {
 	To       string
 	Sent     bool
 	Incoming bool
+}
+type Contact struct {
+	Id              int64
+	User            string
+	ContactId       string
+    ContactName     string
+    Group           string
 }
 
 func authenticate(username, password string) bool {
@@ -171,6 +179,24 @@ func main() {
 		}
 
 	})
+	http.HandleFunc("/contacts/add/", func(w http.ResponseWriter, r *http.Request) {
+		err := r.ParseForm()
+		checkErr(err, "Parsing form failed")
+
+		user := r.Form.Get("User")
+		contactid := r.Form.Get("Id")
+		contactname := r.Form.Get("Name")
+		group := r.Form.Get("Group")
+
+
+        err = insertOrUpdateContact(dbmap, user, contactid, contactname, group)
+		if err == nil {
+			fmt.Fprintf(w, "Ok")
+		} else {
+			fmt.Fprintf(w, "Error", err)
+		}
+
+	})
 	err := srv.SetKeyPair("private.cert", "private.key")
 	if err != nil {
 	}
@@ -184,8 +210,8 @@ func main() {
 				checkErr(err, "Could not insert new message")
 			}
 		})
-	srv.HandleQuery("http://jabber.org/protocol/disco#info", func(w io.Writer, iq xmpp.IQ) {
-		w.Write([]byte(`<iq type='result' from='sms.nicolas.kwyk.fr' to='nicolas@kwyk.fr/YY9R80gi' id='` + iq.Id + `'>
+	srv.HandleQuery("http://jabber.org/protocol/disco#info", func(w io.Writer, req xmpp.Request) {
+		w.Write([]byte(`<iq type='result' from='sms.nicolas.kwyk.fr' to='nicolas@kwyk.fr/YY9R80gi' id='` + req.Id + `'>
                         <query xmlns='http://jabber.org/protocol/disco#info'>
                             <feature var='http://jabber.org/protocol/disco#info'/>
                             <feature var='http://jabber.org/protocol/disco#items'/>
@@ -193,22 +219,28 @@ func main() {
                     </iq>
             `))
 	})
-	srv.HandleQuery("http://jabber.org/protocol/disco#items", func(w io.Writer, iq xmpp.IQ) {
-		w.Write([]byte(`<iq type='result' from='sms.nicolas.kwyk.fr' to='nicolas@kwyk.fr/YY9R80gi' id='` + iq.Id + `'>
+	srv.HandleQuery("http://jabber.org/protocol/disco#items", func(w io.Writer, req xmpp.Request) {
+		w.Write([]byte(`<iq type='result' from='sms.nicolas.kwyk.fr' to='` + req.User + `' id='` + req.Id + `'>
                 <error code="501" type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error>
                 </iq>
         `))
 	})
-	srv.HandleQuery("jabber:iq:roster", func(w io.Writer, iq xmpp.IQ) {
-		w.Write([]byte(`<iq type='result' to='nicolas@kwyk.fr/YY9R80gi' id='` + iq.Id + `'>
-                    <query xmlns="jabber:iq:roster">
-                        <item jid="+33609781500@sms.nicolas.kwyk.fr" subscription="both" name="Julie Famery Phone"><group>Buddies</group></item>
-                        <item jid="+33672317534@sms.nicolas.kwyk.fr" subscription="both" name="Nicolas Patry Phone"><group>Buddies</group></item>
-                    </query>
+	srv.HandleQuery("jabber:iq:roster", func(w io.Writer, req xmpp.Request) {
+        var contacts []Contact
+        dbmap.Select(&contacts, "SELECT * FROM contacts WHERE User=?", req.User)
+        str := ""
+        for _, contact := range(contacts){
+            str += `<item jid="` + contact.ContactId + `" subscription="both" name="` + contact.ContactName + `"><group>` + contact.Group + `</group></item>`
+        }
+
+		w.Write([]byte(`<iq type='result' to='` + req.User + `' id='` + req.Id + `'>
+                    <query xmlns="jabber:iq:roster">`+ str + `</query>
                 </iq>
             `))
-		w.Write([]byte(`<presence from="+33609781500@sms.nicolas.kwyk.fr" to="nicolas@kwyk.fr/YY9R80gi"><caps:c node="http://www.android.com/gtalk/client/caps" ver="1.1" xmlns:caps="http://jabber.org/protocol/caps"/></presence>`))
-		w.Write([]byte(`<presence from="+33672317534@sms.nicolas.kwyk.fr" to="nicolas@kwyk.fr/YY9R80gi"><caps:c node="http://www.android.com/gtalk/client/caps" ver="1.1" xmlns:caps="http://jabber.org/protocol/caps"/></presence>`))
+
+        for _, contact := range(contacts){
+            w.Write([]byte(`<presence from="` + contact.ContactId + `" to="` + contact.User + `"><caps:c node="http://www.android.com/gtalk/client/caps" ver="1.1" xmlns:caps="http://jabber.org/protocol/caps"/></presence>`))
+        }
 	})
 
 	go func() {
@@ -245,6 +277,38 @@ func newIncomingMessage(author, message string, srv xmpp.Server) Message {
 	}
 }
 
+func insertOrUpdateContact(dbmap *gorp.DbMap, user, contactid, contactname, group string) error{
+    var contacts []Contact
+    _, err := dbmap.Select(&contacts, "SELECT * FROM contacts WHERE User=? AND ContactId=?", user, contactid)
+    if err != nil{
+        return err
+    }
+
+    if len(contacts) == 0{
+        contact := Contact{
+            User:user,
+            ContactId:contactid,
+            ContactName:contactname,
+            Group:group,
+        }
+        err = dbmap.Insert(&contact)
+        if err != nil{
+            return err
+        }
+    }else if len(contacts) == 1{
+        contact := contacts[0]
+        contact.ContactName = contactname
+        contact.Group = group
+        _, err = dbmap.Update(&contact)
+        if err != nil{
+            return err
+        }
+    }else{
+        return errors.New("You have more than one contacts")
+    }
+    return nil
+}
+
 func initDb() *gorp.DbMap {
 	// connect to db using standard Go database/sql API
 	// use whatever database/sql driver you wish
@@ -257,6 +321,7 @@ func initDb() *gorp.DbMap {
 	// add a table, setting the table name to 'posts' and
 	// specifying that the Id property is an auto incrementing PK
 	dbmap.AddTableWithName(Message{}, "messages").SetKeys(true, "Id")
+	dbmap.AddTableWithName(Contact{}, "contacts").SetKeys(true, "Id")
 
 	// create the table. in a production system you'd generally
 	// use a migration tool, or create the tables via scripts
@@ -271,3 +336,4 @@ func checkErr(err error, msg string) {
 		log.Fatalln(msg, err)
 	}
 }
+
